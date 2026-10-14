@@ -1,0 +1,10 @@
+# Script runtime output
+*.log
+backup/
+
+# Editors / OS
+*.swp
+*~
+.vscode/
+.idea/
+.DS_Store
