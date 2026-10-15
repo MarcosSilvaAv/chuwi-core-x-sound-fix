@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  CHUWI CoreBook X - left speaker fix (Realtek ALC269VC, SSID 0x1e507036)
+#  CHUWI CoreBook X - left speaker fix (Realtek ALC269VC)
 #
 #  The BIOS leaves pin 0x1b marked as "not connected", so Linux only drives
 #  pin 0x14. This enables 0x1b as an internal speaker (the same fix the
 #  kernel already uses for the CoreBook X Pro: ALC269VB_FIXUP_CHUWI_COREBOOK_XPRO).
+#
+#  The codec address and subsystem ID (SSID) are detected automatically.
+#  SSIDs in KNOWN_SSIDS are confirmed working; any other ALC269 machine is
+#  allowed after a warning (run the Test option first!).
 #
 #  Usage:  ./corebook-x-audio-fix.sh            (interactive menu)
 #          ./corebook-x-audio-fix.sh install | uninstall | test
@@ -17,9 +21,12 @@ set -uo pipefail
 # ----------------------------------------------------------------- settings --
 PIN="0x1b"
 CFG="0x90170150"
+UNCONNECTED_CFG="0x411111f0"
 CODEC_VENDOR="0x10ec0269"
-CODEC_SSID="0x1e507036"
-HW="/sys/class/sound/hwC0D0"
+
+# Subsystem IDs confirmed to work with this fix.
+#   0x1e507036 - CHUWI CoreBook X (i5-12450H, 14" 2K)
+KNOWN_SSIDS=("0x1e507036")
 
 FW_NAME="chuwi-corebook-x-audio.fw"
 FW_FILE="/usr/lib/firmware/$FW_NAME"
@@ -30,6 +37,9 @@ MANAGED_FILES=("$FW_FILE" "$MODPROBE_FILE" "$DRACUT_FILE")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="$SCRIPT_DIR/corebook-x-audio-fix.log"
 BACKUP_DIR="$SCRIPT_DIR/backup"
+
+# Filled in by detect_codec()
+HW=""; CARD=""; ADDR=""; CODEC_SSID=""; CODEC_PROC=""
 
 # ------------------------------------------------------------------ logging --
 # Send all stdout/stderr to the console AND the log file.
@@ -70,15 +80,70 @@ check_user() {
     [ "$EUID" -ne 0 ] || die "Run this script as your normal user (not with sudo). It will ask for sudo when needed."
 }
 
+# Find the first Realtek ALC269-family codec and read its SSID / address.
+detect_codec() {
+    local dev name
+    for dev in /sys/class/sound/hwC*D*; do
+        [ -r "$dev/vendor_id" ] || continue
+        if [ "$(cat "$dev/vendor_id")" = "$CODEC_VENDOR" ]; then
+            HW="$dev"
+            name="$(basename "$dev")"          # e.g. hwC0D0
+            CARD="${name#hwC}"; CARD="${CARD%%D*}"
+            ADDR="${name##*D}"
+            CODEC_SSID="$(cat "$dev/subsystem_id")"
+            CODEC_PROC="/proc/asound/card$CARD/codec#$ADDR"
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_known_ssid() {
+    local s
+    for s in "${KNOWN_SSIDS[@]}"; do [ "$s" = "$CODEC_SSID" ] && return 0; done
+    return 1
+}
+
+# Get a pin's value from a sysfs pin config list (init/driver/user_pin_configs).
+pin_value() { awk -v p="$PIN" 'tolower($1)==p {print tolower($2)}' "$HW/$1" 2>/dev/null | tail -n1; }
+
 check_hardware() {
-    local vendor ssid
-    vendor="$(cat "$HW/vendor_id" 2>/dev/null)"
-    ssid="$(cat "$HW/subsystem_id" 2>/dev/null)"
-    log "Codec vendor=$vendor subsystem=$ssid (expected $CODEC_VENDOR / $CODEC_SSID)"
-    if [ "$vendor" != "$CODEC_VENDOR" ] || [ "$ssid" != "$CODEC_SSID" ]; then
-        die "This does not look like a CHUWI CoreBook X (ALC269VC). Aborting."
+    detect_codec || die "No Realtek ALC269 codec ($CODEC_VENDOR) found. This fix does not apply to this machine."
+
+    local chip product vendor init_cfg drv_cfg
+    chip="$(cat "$HW/chip_name" 2>/dev/null)"
+    vendor="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)"
+    product="$(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+    log "Machine : $vendor / $product"
+    log "Codec   : $chip ($(cat "$HW/vendor_id")) at $HW, SSID=$CODEC_SSID"
+
+    # Pin 0x1b must exist and be able to output audio.
+    if ! awk -v n="Node $PIN " 'index($0,n)==1{f=1;next} /^Node /{f=0} f && /Pincap/ && / OUT/{found=1} END{exit !found}' "$CODEC_PROC" 2>/dev/null; then
+        die "Pin $PIN on this codec is not an output pin. This fix does not apply."
     fi
-    ok "Hardware matches."
+
+    # If the kernel already configures pin 0x1b as a speaker, nothing to do.
+    drv_cfg="$(pin_value driver_pin_configs)"
+    if [[ "$drv_cfg" == 0x9017* ]]; then
+        die "The kernel already sets pin $PIN as a speaker ($drv_cfg) for this model. The fix is not needed."
+    fi
+
+    # Warn if the BIOS actually describes pin 0x1b as something else.
+    init_cfg="$(pin_value init_pin_configs)"
+    log "Pin $PIN BIOS default: ${init_cfg:-unknown}"
+    if [ -n "$init_cfg" ] && [ "$init_cfg" != "$UNCONNECTED_CFG" ]; then
+        warn "The BIOS describes pin $PIN as connected ($init_cfg), not unused. Overriding it may break another jack."
+        ask_yes "Continue anyway?" || die "Aborted by user."
+    fi
+
+    if is_known_ssid; then
+        ok "SSID $CODEC_SSID is a confirmed CoreBook X model."
+    else
+        warn "SSID $CODEC_SSID has not been confirmed with this fix yet."
+        warn "It uses the same codec, so it will probably work, but please run the Test option first."
+        warn "If it works, please report your SSID at https://github.com/MarcosSilvaAv/chuwi-core-x-sound-fix/issues"
+        ask_yes "Continue with SSID $CODEC_SSID?" || die "Aborted by user."
+    fi
 }
 
 is_installed() { [ -f "$FW_FILE" ] && [ -f "$MODPROBE_FILE" ]; }
@@ -86,13 +151,20 @@ is_installed() { [ -f "$FW_FILE" ] && [ -f "$MODPROBE_FILE" ]; }
 show_status() {
     echo
     echo "  Kernel        : $(uname -r)"
-    echo "  Codec         : $(cat "$HW/chip_name" 2>/dev/null) ($(cat "$HW/subsystem_id" 2>/dev/null))"
+    echo "  Machine       : $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+    if detect_codec; then
+        local known="not confirmed yet"
+        is_known_ssid && known="confirmed"
+        echo "  Codec         : $(cat "$HW/chip_name" 2>/dev/null) at $(basename "$HW"), SSID $CODEC_SSID ($known)"
+    else
+        echo "  Codec         : no ALC269 codec found"
+    fi
     if is_installed; then
         echo "  Fix installed : YES"
     else
         echo "  Fix installed : no"
     fi
-    if grep -qi "^$PIN $CFG" "$HW/driver_pin_configs" "$HW/user_pin_configs" 2>/dev/null; then
+    if [ -n "$HW" ] && grep -qi "^$PIN $CFG" "$HW/driver_pin_configs" "$HW/user_pin_configs" 2>/dev/null; then
         echo "  Fix active now: YES (pin $PIN = $CFG)"
     else
         echo "  Fix active now: no"
@@ -143,7 +215,7 @@ do_test() {
     log "Active pin overrides:"
     run cat "$HW/user_pin_configs"
     log "Mixer controls:"
-    amixer -c0 scontents | grep -E "^Simple|Playback" | grep -v -E "IEC958|Mic" >&2
+    amixer -c"$CARD" scontents | grep -E "^Simple|Playback" | grep -v -E "IEC958|Mic" >&2
     log "Playing 'Front Left' / 'Front Right' voice test twice..."
     run speaker-test -c 2 -t wav -l 2
     ok "Test finished. If both speakers sounded good, choose 'Install'."
@@ -166,7 +238,7 @@ do_install() {
     done
 
     sudo_write "$FW_FILE" "[codec]
-$CODEC_VENDOR $CODEC_SSID 0
+$CODEC_VENDOR $CODEC_SSID $ADDR
 
 [pincfg]
 $PIN $CFG" || die "Could not write $FW_FILE"
@@ -182,7 +254,7 @@ install_items+=\" $FW_FILE \"" || die "Could not write $DRACUT_FILE"
     log "Rebuilding initramfs (this can take a minute)..."
     run sudo dracut -f || die "dracut failed. Run the uninstall option to roll back."
 
-    ok "Fix installed."
+    ok "Fix installed for SSID $CODEC_SSID."
     offer_reboot
 }
 
