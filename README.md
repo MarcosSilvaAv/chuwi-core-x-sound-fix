@@ -21,7 +21,7 @@ This script tells the `snd-hda-intel` driver to treat pin `0x1b` as an internal 
 
 ## Requirements
 
-- CHUWI CoreBook X with a Realtek ALC269VC codec (the script checks this and stops if it isn't found)
+- A CHUWI laptop with a Realtek ALC269 codec (`0x10ec0269`, shown as ALC269VC/VB). The script checks this and stops if none is found.
 - `bash`, `sudo`, `systemd`, `dracut`
 - `alsa-utils` (for `amixer` and `speaker-test`)
 
@@ -32,6 +32,24 @@ cat /sys/class/sound/hwC0D0/chip_name /sys/class/sound/hwC0D0/subsystem_id
 # ALC269VC
 # 0x1e507036
 ```
+
+## Supported models
+
+The script **detects the codec address and subsystem ID (SSID) automatically**, and the installed patch is created for *your* SSID.
+
+| SSID | Model | Status |
+|---|---|---|
+| `0x1e507036` | CoreBook X (i5-12450H, 14" 2K) | ✅ Confirmed |
+| `0x27820232` | CoreBook X Pro | Already fixed in the kernel – not needed |
+| other | Other CHUWI laptops with an ALC269 | ⚠️ Not confirmed yet – use **Test** first |
+
+If your SSID isn't confirmed yet, the script warns you and asks before continuing. Before changing anything, it also checks that:
+
+- pin `0x1b` exists and can output audio
+- the kernel doesn't already set pin `0x1b` as a speaker for your model
+- the BIOS leaves pin `0x1b` unused (if not, it warns you and asks)
+
+If the fix works on your laptop, please [open an issue](https://github.com/MarcosSilvaAv/chuwi-core-x-sound-fix/issues) with your model and SSID so it can be added to the list.
 
 ## Usage
 
